@@ -210,6 +210,14 @@ test_evaluator = val_evaluator
         user_frame = ttk.LabelFrame(self.users_frame, text=f"User {user_id + 1}")
         user_frame.pack(side=tk.LEFT, padx=10, pady=5)
         
+        # Skill level selection
+        skill_var = tk.StringVar(value="beginner")
+        skill_label = ttk.Label(user_frame, text="Skill Level:")
+        skill_label.pack()
+        skill_dropdown = ttk.Combobox(user_frame, textvariable=skill_var, 
+                                    values=["beginner", "intermediate", "advanced"])
+        skill_dropdown.pack(pady=5)
+        
         # Pose selection for this user
         pose_var = tk.StringVar()
         pose_names = list(self.reference_poses.keys())
@@ -221,6 +229,7 @@ test_evaluator = val_evaluator
         # Store user selections
         self.user_selections[user_id] = {
             'pose_var': pose_var,
+            'skill_var': skill_var,
             'frame': user_frame
         }
         
@@ -264,7 +273,7 @@ test_evaluator = val_evaluator
             return [], []
 
     def normalize_keypoints(self, kps):
-        """Enhanced normalization considering scale, rotation and translation invariance"""
+        """Enhanced normalization considering scale, rotation, and translation invariance for each limb"""
         # Check if keypoints have confidence scores
         has_confidence = kps.shape[1] > 2
         
@@ -274,6 +283,42 @@ test_evaluator = val_evaluator
         
         # Translate to origin
         normalized_kps[:, :2] = normalized_kps[:, :2] - hip_center
+        
+        # Normalize each limb independently
+        def normalize_limb(start_idx, mid_idx, end_idx):
+            # Calculate limb vector and its length
+            limb_vector = normalized_kps[end_idx, :2] - normalized_kps[start_idx, :2]
+            limb_length = np.linalg.norm(limb_vector)
+            
+            # Calculate reference limb vector and its length
+            ref_limb_vector = kps[end_idx, :2] - kps[start_idx, :2]
+            ref_limb_length = np.linalg.norm(ref_limb_vector)
+            
+            # Scale limb
+            if ref_limb_length > 0:
+                scale_factor = limb_length / ref_limb_length
+                normalized_kps[start_idx:end_idx+1, :2] /= scale_factor
+            
+            # Calculate rotation angle
+            if limb_vector[0] != 0:  # Avoid division by zero
+                angle = np.arctan2(limb_vector[1], limb_vector[0])
+                rotation_matrix = np.array([
+                    [np.cos(-angle), -np.sin(-angle)],
+                    [np.sin(-angle), np.cos(-angle)]
+                ])
+                
+                # Apply rotation to limb keypoints
+                for i in range(start_idx, end_idx + 1):
+                    if not has_confidence or (has_confidence and normalized_kps[i, 2] > 0.3):
+                        normalized_kps[i, :2] = rotation_matrix @ normalized_kps[i, :2]
+        
+        # Normalize arms
+        normalize_limb(5, 7, 9)  # Left arm
+        normalize_limb(6, 8, 10)  # Right arm
+        
+        # Normalize legs
+        normalize_limb(11, 13, 15)  # Left leg
+        normalize_limb(12, 14, 16)  # Right leg
         
         # Scale by torso size (distance between hip center and neck)
         neck = (kps[5, :2] + kps[6, :2]) / 2
@@ -292,14 +337,13 @@ test_evaluator = val_evaluator
             
             # Apply rotation to all keypoints
             for i in range(len(normalized_kps)):
-                # Only rotate keypoints with good confidence if confidence scores are available
                 if not has_confidence or (has_confidence and normalized_kps[i, 2] > 0.3):
                     normalized_kps[i, :2] = rotation_matrix @ normalized_kps[i, :2]
         
         return normalized_kps
 
-    def compare_poses(self, current_keypoints, reference_keypoints):
-        """Compare poses with detailed Bharatanatyam-specific feedback"""
+    def compare_poses(self, current_keypoints, reference_keypoints, skill_level="beginner"):
+        """Compare poses with detailed Bharatanatyam-specific feedback based on skill level"""
         feedback = []
         all_parts_correct = True
         
@@ -308,37 +352,44 @@ test_evaluator = val_evaluator
         reference_normalized = self.normalize_keypoints(reference_keypoints)
         
         # Define Bharatanatyam-specific body parts with their keypoint indices and thresholds
+        # Adjust thresholds based on skill level
+        threshold_multiplier = {
+            "beginner": 1.5,    # More lenient for beginners
+            "intermediate": 1.0, # Standard thresholds
+            "advanced": 0.7      # Stricter for advanced
+        }
+        
         bharatanatyam_parts = {
             'mudras': {
-                'left_hand': list(range(91, 111)),  # Left hand keypoints
-                'right_hand': list(range(112, 132)),  # Right hand keypoints
-                'threshold': 0.2,
+                'left_hand': list(range(91, 111)),
+                'right_hand': list(range(112, 132)),
+                'threshold': 0.2 * threshold_multiplier[skill_level],
                 'conf_threshold': 0.3,
                 'importance': 'critical'
             },
             'araimandi': {
-                'knees': [13, 14],  # Left and right knees
-                'ankles': [15, 16],  # Left and right ankles
-                'threshold': 0.15,
+                'knees': [13, 14],
+                'ankles': [15, 16],
+                'threshold': 0.15 * threshold_multiplier[skill_level],
                 'conf_threshold': 0.5,
                 'importance': 'critical'
             },
             'arms': {
-                'elbows': [7, 8],  # Left and right elbows
-                'shoulders': [5, 6],  # Left and right shoulders
-                'threshold': 0.15,
+                'elbows': [7, 8],
+                'shoulders': [5, 6],
+                'threshold': 0.15 * threshold_multiplier[skill_level],
                 'conf_threshold': 0.5,
                 'importance': 'high'
             },
             'torso': {
-                'spine': [5, 6, 11, 12],  # Shoulders and hips
-                'threshold': 0.15,
+                'spine': [5, 6, 11, 12],
+                'threshold': 0.15 * threshold_multiplier[skill_level],
                 'conf_threshold': 0.5,
                 'importance': 'high'
             },
             'feet': {
-                'positions': [15, 16],  # Ankles/feet positions
-                'threshold': 0.15,
+                'positions': [15, 16],
+                'threshold': 0.15 * threshold_multiplier[skill_level],
                 'conf_threshold': 0.4,
                 'importance': 'medium'
             }
@@ -362,7 +413,7 @@ test_evaluator = val_evaluator
                 
                 if avg_conf < bharatanatyam_parts['mudras']['conf_threshold']:
                     feedback_by_importance['critical'].append(
-                        f"⚠️ {side.replace('_', ' ').title()}: Mudra not clearly visible"
+                        f"{side.replace('_', ' ').title()}: Mudra not clearly visible"
                     )
                     return
                 
@@ -390,43 +441,62 @@ test_evaluator = val_evaluator
             
             # Calculate knee bend angle
             left_knee_angle = self.calculate_angle(
-                current_normalized[11],  # Left hip
-                current_normalized[13],  # Left knee
-                current_normalized[15]   # Left ankle
+                current_normalized[11],
+                current_normalized[13],
+                current_normalized[15]
             )
             right_knee_angle = self.calculate_angle(
-                current_normalized[12],  # Right hip
-                current_normalized[14],  # Right knee
-                current_normalized[16]   # Right ankle
+                current_normalized[12],
+                current_normalized[14],
+                current_normalized[16]
             )
             
             # Ideal Araimandi angle is approximately 120 degrees
             ideal_angle = 120
-            angle_threshold = 15
+            angle_threshold = 15 * threshold_multiplier[skill_level]
             
             if abs(left_knee_angle - ideal_angle) > angle_threshold or \
                abs(right_knee_angle - ideal_angle) > angle_threshold:
                 feedback_by_importance['critical'].append(
                     "✗ Araimandi: Adjust knee bend - aim for half-sitting position"
                 )
-                if left_knee_angle > ideal_angle + angle_threshold:
-                    feedback_by_importance['critical'].append("  - Bend left knee more")
-                elif left_knee_angle < ideal_angle - angle_threshold:
-                    feedback_by_importance['critical'].append("  - Straighten left knee slightly")
-                if right_knee_angle > ideal_angle + angle_threshold:
-                    feedback_by_importance['critical'].append("  - Bend right knee more")
-                elif right_knee_angle < ideal_angle - angle_threshold:
-                    feedback_by_importance['critical'].append("  - Straighten right knee slightly")
+                if skill_level == "advanced":
+                    # More detailed feedback for advanced users
+                    if left_knee_angle > ideal_angle + angle_threshold:
+                        feedback_by_importance['critical'].append(
+                            f"  - Bend left knee more (current: {left_knee_angle:.1f}°, target: {ideal_angle:.1f}°)"
+                        )
+                    elif left_knee_angle < ideal_angle - angle_threshold:
+                        feedback_by_importance['critical'].append(
+                            f"  - Straighten left knee slightly (current: {left_knee_angle:.1f}°, target: {ideal_angle:.1f}°)"
+                        )
+                    if right_knee_angle > ideal_angle + angle_threshold:
+                        feedback_by_importance['critical'].append(
+                            f"  - Bend right knee more (current: {right_knee_angle:.1f}°, target: {ideal_angle:.1f}°)"
+                        )
+                    elif right_knee_angle < ideal_angle - angle_threshold:
+                        feedback_by_importance['critical'].append(
+                            f"  - Straighten right knee slightly (current: {right_knee_angle:.1f}°, target: {ideal_angle:.1f}°)"
+                        )
+                else:
+                    # Simpler feedback for beginners and intermediate
+                    if left_knee_angle > ideal_angle + angle_threshold:
+                        feedback_by_importance['critical'].append("  - Bend left knee more")
+                    elif left_knee_angle < ideal_angle - angle_threshold:
+                        feedback_by_importance['critical'].append("  - Straighten left knee slightly")
+                    if right_knee_angle > ideal_angle + angle_threshold:
+                        feedback_by_importance['critical'].append("  - Bend right knee more")
+                    elif right_knee_angle < ideal_angle - angle_threshold:
+                        feedback_by_importance['critical'].append("  - Straighten right knee slightly")
             else:
                 feedback_by_importance['critical'].append("✓ Araimandi: Good knee position")
 
         # Analyze Arms Position
         def analyze_arms():
             try:
-                # Define arm points for left and right sides
                 arm_points = [
-                    {"side": "Left", "points": [5, 7, 9]},    # Left shoulder, elbow, wrist
-                    {"side": "Right", "points": [6, 8, 10]}   # Right shoulder, elbow, wrist
+                    {"side": "Left", "points": [5, 7, 9]},
+                    {"side": "Right", "points": [6, 8, 10]}
                 ]
                 
                 for arm in arm_points:
@@ -434,48 +504,50 @@ test_evaluator = val_evaluator
                     elbow_idx = arm["points"][1]
                     wrist_idx = arm["points"][2]
                     
-                    # Check confidence scores for arm points
                     if (scores[shoulder_idx] > 0.3 and 
                         scores[elbow_idx] > 0.3 and 
                         scores[wrist_idx] > 0.3):
                         
-                        # Calculate arm angle
                         arm_angle = self.calculate_angle(
                             current_normalized[shoulder_idx],
                             current_normalized[elbow_idx],
                             current_normalized[wrist_idx]
                         )
                         
-                        # Compare with reference angle
                         ref_arm_angle = self.calculate_angle(
                             reference_normalized[shoulder_idx],
                             reference_normalized[elbow_idx],
                             reference_normalized[wrist_idx]
                         )
                         
-                        if abs(arm_angle - ref_arm_angle) > 20:  # 20 degrees threshold
+                        angle_threshold = 20 * threshold_multiplier[skill_level]
+                        if abs(arm_angle - ref_arm_angle) > angle_threshold:
                             direction = "bend" if arm_angle > ref_arm_angle else "straighten"
-                            feedback_by_importance['high'].append(
-                                f"✗ {arm['side']} Arm: {direction} your elbow slightly"
-                            )
+                            if skill_level == "advanced":
+                                feedback_by_importance['high'].append(
+                                    f"✗ {arm['side']} Arm: {direction} your elbow slightly (current: {arm_angle:.1f}°, target: {ref_arm_angle:.1f}°)"
+                                )
+                            else:
+                                feedback_by_importance['high'].append(
+                                    f"✗ {arm['side']} Arm: {direction} your elbow slightly"
+                                )
                         else:
                             feedback_by_importance['high'].append(
                                 f"✓ {arm['side']} Arm: Good position"
                             )
                     else:
                         feedback_by_importance['high'].append(
-                            f"⚠️ {arm['side']} Arm: Not clearly visible"
+                            f"{arm['side']} Arm: Not clearly visible"
                         )
                     
             except Exception as e:
                 print(f"Error in analyze_arms: {str(e)}")
-                feedback_by_importance['high'].append("⚠️ Unable to analyze arms properly")
+                feedback_by_importance['high'].append("Unable to analyze arms properly")
 
         # Analyze Torso Alignment
         def analyze_torso():
             spine_points = bharatanatyam_parts['torso']['spine']
             
-            # Calculate spine angle relative to vertical
             hip_center = (current_normalized[11, :2] + current_normalized[12, :2]) / 2
             shoulder_center = (current_normalized[5, :2] + current_normalized[6, :2]) / 2
             spine_angle = np.degrees(np.arctan2(
@@ -483,11 +555,17 @@ test_evaluator = val_evaluator
                 shoulder_center[1] - hip_center[1]
             ))
             
-            if abs(spine_angle) > 10:  # 10 degrees threshold
+            angle_threshold = 10 * threshold_multiplier[skill_level]
+            if abs(spine_angle) > angle_threshold:
                 direction = "right" if spine_angle > 0 else "left"
-                feedback_by_importance['high'].append(
-                    f"✗ Torso: Align your spine - leaning to the {direction}"
-                )
+                if skill_level == "advanced":
+                    feedback_by_importance['high'].append(
+                        f"✗ Torso: Align your spine - leaning to the {direction} (current: {spine_angle:.1f}°, target: 0°)"
+                    )
+                else:
+                    feedback_by_importance['high'].append(
+                        f"✗ Torso: Align your spine - leaning to the {direction}"
+                    )
             else:
                 feedback_by_importance['high'].append(
                     "✓ Torso: Good alignment"
@@ -506,8 +584,9 @@ test_evaluator = val_evaluator
         feedback.append("\nImportant Adjustments:")
         feedback.extend(feedback_by_importance['high'])
         
-        feedback.append("\nMinor Adjustments:")
-        feedback.extend(feedback_by_importance['medium'])
+        if skill_level == "advanced":
+            feedback.append("\nMinor Adjustments:")
+            feedback.extend(feedback_by_importance['medium'])
         
         return feedback
 
@@ -549,6 +628,7 @@ test_evaluator = val_evaluator
             reference_data = {}
             for user_id, selection in self.user_selections.items():
                 selected_pose = selection['pose_var'].get()
+                skill_level = selection['skill_var'].get()
                 reference_dir = Path('/home/user/mmpose/Bharatnatyam_combined/ideal_pose')
                 reference_image_path = reference_dir / f"{selected_pose}.jpg"
                 
@@ -558,6 +638,7 @@ test_evaluator = val_evaluator
                 
                 reference_data[user_id] = {
                     'pose_name': selected_pose,
+                    'skill_level': skill_level,
                     'image': cv2.imread(str(reference_image_path)),
                     'keypoints': np.array(self.reference_poses[selected_pose]['keypoints'])
                 }
@@ -597,7 +678,6 @@ test_evaluator = val_evaluator
                 # Build a list of detections with computed center x-coordinate for ordering
                 detected_persons = []
                 for idx, (kpts, scrs) in enumerate(zip(keypoints_list, scores_list)):
-                    # Get only the valid keypoints (with confidence > 0.3)
                     if kpts.shape[1] > 2:
                         valid_points = kpts[kpts[:, 2] > 0.3][:, :2]
                     else:
@@ -605,14 +685,13 @@ test_evaluator = val_evaluator
                     center_x = np.mean(valid_points[:, 0]) if valid_points.shape[0] > 0 else 0
                     detected_persons.append({'center_x': center_x, 'keypoints': kpts, 'scores': scrs})
                 
-                # Sort detected persons from leftmost to rightmost (increasing x-coordinate)
+                # Sort detected persons from leftmost to rightmost
                 detected_persons.sort(key=lambda person: person['center_x'])
                 
                 # Map detections to users based on the order users were added
                 sorted_user_ids = sorted(self.user_selections.keys())
                 for idx, user_id in enumerate(sorted_user_ids):
                     if idx >= len(detected_persons):
-                        # Update feedback if no detection for this user
                         self.feedback_texts[user_id].delete(1.0, tk.END)
                         self.feedback_texts[user_id].insert(tk.END, f"User {user_id + 1}: No detection")
                         continue
@@ -632,9 +711,9 @@ test_evaluator = val_evaluator
                     overlay = cv2.addWeighted(overlay, 0.8, scaled_ref, 0.2, 0)
                     
                     # Compare poses and update feedback for the corresponding user
-                    feedback = self.compare_poses(kpts, ref_data['keypoints'])
+                    feedback = self.compare_poses(kpts, ref_data['keypoints'], ref_data['skill_level'])
                     self.feedback_texts[user_id].delete(1.0, tk.END)
-                    self.feedback_texts[user_id].insert(tk.END, f"User {user_id + 1}:\n" + "\n".join(feedback))
+                    self.feedback_texts[user_id].insert(tk.END, f"User {user_id + 1} ({ref_data['skill_level'].title()}):\n" + "\n".join(feedback))
                     
                     # Draw skeleton for this detection
                     self.draw_skeleton(overlay, kpts, scrs)
